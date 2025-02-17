@@ -7,7 +7,12 @@ from bridge.context import ContextType
 from bridge.reply import Reply, ReplyType
 from common.log import logger
 from datetime import datetime, timedelta
+from collections import defaultdict
 
+# 配置信息
+# open_ai_api_key = "填写你的OpenAI API Key"
+# model = "gpt-3.5-turbo"
+# open_ai_api_base = "https://api.openai.com/v1"
 
 BASE_URL_HIGHSPEEDTICKET = "https://api.pearktrue.cn/api/highspeedticket"
 
@@ -178,6 +183,8 @@ class TicketQuery(Plugin):
             })
             logger.debug(f"查询历史记录：{self.conversation_history[-1]}")
 
+            full_data = self.get_ticket_info(ticket_type, from_location, to_location, query_date, query_time)
+            
             # 获取票务信息
             result = self.get_ticket_info(
                 ticket_type, 
@@ -187,14 +194,6 @@ class TicketQuery(Plugin):
                 query_time
             )
             
-                    # 获取完整数据
-            full_data = self.get_ticket_info(
-                ticket_type, 
-                from_location, 
-                to_location,
-                query_date,
-                query_time
-            )
         
             if full_data:
                 # 保存完整数据和查询参数
@@ -209,14 +208,8 @@ class TicketQuery(Plugin):
                 reply_content = "未找到符合条件的车次"
             # 处理结果
             reply = Reply()
-            if result:
-                reply.type = ReplyType.TEXT
-                reply.content = self._format_response(result)
-                self.ticket_info_list = result  # 保存结果用于后续筛选
-            else:
-                reply.type = ReplyType.ERROR
-                reply.content = "未找到符合条件的车次，请调整查询条件"
-                
+            reply.type = ReplyType.TEXT if full_data else ReplyType.ERROR
+            reply.content = reply_content
             e_context["reply"] = reply
             e_context.action = EventAction.BREAK_PASS
 
@@ -241,6 +234,7 @@ class TicketQuery(Plugin):
             logger.debug(f"API响应：{resp.status_code}，内容：{resp.text}")
             if resp.status_code == 200:
                 data = resp.json()
+                logger.debug(f"原始API数据：{json.dumps(data, ensure_ascii=False)}")  # 新增调试日志
                 if data.get('code') == 200:
                     return self._process_api_data(data.get('data', []), ticket_type, time)
                 else:
@@ -251,45 +245,85 @@ class TicketQuery(Plugin):
             logger.error(f"API请求失败：{e}")
             return None
 
-    def _process_api_data(self, data, ticket_type, query_time):
-        """增强数据处理"""
-        filtered = []
-        for item in data:
-            # 确保包含必要字段
-            if not all(key in item for key in ['departstation', 'arrivestation', 'runtime']):
-                continue
+    # def _process_api_data(self, data, ticket_type, query_time):
+    #     """增强数据处理"""
+    #     filtered = []
+    #     for item in data:
+    #         # 确保包含必要字段
+    #         if not all(key in item for key in ['departstation', 'arrivestation', 'runtime']):
+    #             continue
             
+    #     """处理API返回数据"""
+    #     logger.debug(f"处理API返回的数据：{data}")
+    #     filtered = []
+    #     for item in data:
+    #         if item.get('traintype', '').lower() != ticket_type.lower():
+    #             continue
+                
+    #         depart_time = datetime.strptime(item['departtime'], "%H:%M").time()
+            
+    #         # 时间筛选
+    #         if query_time:
+    #             query_time_obj = datetime.strptime(query_time, "%H:%M").time()
+    #             if depart_time < query_time_obj:
+    #                 continue
+                    
+    #         filtered.append(item)
+            
+    #         # 添加票价统计信息
+    #         min_price = None
+    #         max_price = None
+    #         for seat in item.get('ticket_info', []):
+    #             price = seat.get('seatprice')
+    #             if price:
+    #                 price = float(price)
+    #                 min_price = min(min_price, price) if min_price else price
+    #                 max_price = max(max_price, price) if max_price else price
+    #         item['price_range'] = f"¥{min_price}-{max_price}" if min_price and max_price else "价格未知"
+            
+    #         filtered.append(item)
+            
+    #     # 按出发时间排序
+    #     return sorted(filtered, key=lambda x: x['departtime'])
+    
+    def _process_api_data(self, data, ticket_type, query_time):
         """处理API返回数据"""
         logger.debug(f"处理API返回的数据：{data}")
+        seen_trains = set()  # 用于去重的集合
         filtered = []
         for item in data:
-            if item.get('traintype', '').lower() != ticket_type.lower():
+            # 1. 字段完整性校验
+            required_fields = ['trainumber', 'departtime', 'arrivetime', 'traintype']
+            if not all(key in item for key in required_fields):
+                logger.debug(f"缺失必要字段，跳过条目：{item}")
                 continue
-                
+
+            # 2. 去重判断（按车次+出发时间）
+            unique_key = f"{item['trainumber']}_{item['departtime']}_{item['arrivetime']}"
+            if unique_key in seen_trains:
+                logger.debug(f"跳过重复车次：{unique_key}")
+                continue
+            seen_trains.add(unique_key)
+        
+            # 3. 类型筛选
+            if item['traintype'].lower() != ticket_type.lower():
+                continue
+            
+            # 4. 时间筛选
             depart_time = datetime.strptime(item['departtime'], "%H:%M").time()
-            
-            # 时间筛选
             if query_time:
-                query_time_obj = datetime.strptime(query_time, "%H:%M").time()
-                if depart_time < query_time_obj:
-                    continue
+                try:
+                    query_time_obj = datetime.strptime(query_time, "%H:%M").time()
+                    if depart_time < query_time_obj:
+                        continue
+                except ValueError:
+                    logger.warning(f"无效的时间格式: {query_time}")
                     
+            # 5. 仅添加一次
             filtered.append(item)
-            
-            # 添加票价统计信息
-            min_price = None
-            max_price = None
-            for seat in item.get('ticket_info', []):
-                price = seat.get('seatprice')
-                if price:
-                    price = float(price)
-                    min_price = min(min_price, price) if min_price else price
-                    max_price = max(max_price, price) if max_price else price
-            item['price_range'] = f"¥{min_price}-{max_price}" if min_price and max_price else "价格未知"
-            
-            filtered.append(item)
-            
-        # 按出发时间排序
+            logger.debug(f"数据": {item})
+
+        #按出发时间排序
         return sorted(filtered, key=lambda x: x['departtime'])
         
     def _handle_pagination(self, e_context):
