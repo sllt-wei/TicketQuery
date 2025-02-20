@@ -321,7 +321,7 @@ class TicketQuery(Plugin):
                     
             # 5. 仅添加一次
             filtered.append(item)
-            logger.debug(f"数据": {item})
+            logger.debug(f"数据: {item}")
 
         #按出发时间排序
         return sorted(filtered, key=lambda x: x['departtime'])
