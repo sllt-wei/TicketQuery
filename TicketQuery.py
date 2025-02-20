@@ -2,7 +2,7 @@ import requests
 import openai
 import re
 import plugins
-from plugins import *
+from plugins import Plugin
 from bridge.context import ContextType
 from bridge.reply import Reply, ReplyType
 from common.log import logger
